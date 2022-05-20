@@ -1,0 +1,334 @@
+// Carlos Felipe Rengifo
+// carlosfeliperengifo@gmail.com
+// Jan 09 2022
+
+// Canvas dimensions
+int maxcanvasx = 480;
+int maxcanvasy = 480;
+
+// World dimensions
+float maxworldx = +2.2;
+float minworldx = -2.2;
+float maxworldy = +2.2;
+float minworldy = -2.2;
+
+// Current state of the cart-pendulum system
+// x1 = linear position, x2 = angular position
+// x3 = linear velocity, x4 = angular velocity
+float [] x = {0, radians(90), 0, 0};  
+
+// States of the controller
+float [] z = {0, 0, 0, 0, 0};
+
+// Maximum force exerted by the actuator
+float maxforce = 50;
+
+// Samplint time
+float sampling_time = 0.01;
+
+void setup() {
+  size(480, 480);
+  smooth();
+  ellipseMode(RADIUS);
+  frameRate(100);
+}
+
+void draw() {
+  float u, ref;
+  float [] y;
+  
+  // Draw the cart pendulum system 
+  background(255, 255, 255);  
+  draw_cart_pendulum(x[0], x[1]);
+  draw_slider();
+
+  // Read setpoint
+  ref = canvas2worldx(squarex);
+  
+  // Read the linear and angular positions of the cart-pendulum
+  y   = read_process_output();
+  
+  // Calculate control
+  u   = calculate_control(ref, y);
+  
+  // Update states
+  update_states(u);
+}
+
+// Read measured outputs
+float [] read_process_output(){
+  float [] y = {x[0], x[1]};
+  return y;
+}
+
+// Calculate control
+float calculate_control(float ref, float [] y) {
+  float y1 = y[0], y2 = y[1];
+  float z1 = z[0], z2 = z[1], z3 = z[2], z4 = z[3], z5 = z[4];
+  
+  // Convertion from physical variables to deviations
+  y2    = y2 - HALF_PI;
+  
+  // Update controller states
+  z[0]  = +0.6336*z1-0.0062*z2+0.0112*z3-0.0022*z4+0.3681*y1;
+  z[1]  = +0.0014*z1+0.6252*z2+0.0010*z3+0.0082*z4+0.3702*y2;
+  z[2]  = -0.0125*z1-1.2411*z2+1.2405*z3-0.4424*z4-0.0195*z5+0.3565*y1+0.0021*y2;
+  z[3]  = +0.2749*z1-1.3696*z2+0.1924*z3+0.6464*z4-0.0156*z5+0.0003*y1+0.4568*y2;
+  z[4]  = +z5+0.1250*ref-0.1250*y1;
+
+  // Calculate output
+  return +37.1493*z1-134.0017*z2+25.9698*z3-47.7797*z4-2.1092*z5;
+}  
+
+/*
+  FUNCTIONS TO SOLVE ORDINARY DIFFERENTIAL EQUATION
+*/
+// Thrid order Runge-Kutta
+void update_states(float u) {
+  // Sampling time
+  float Ts = sampling_time;
+  
+  // Derivatives for the first, second, and third integration
+  float [] k1, k2, k3;
+  // k1 = f(u, x)
+  k1 = f(u, x);
+  k1 = gain(Ts, k1);
+
+  // k2 = f(u, x + k1/2)
+  k2 = f(u, sum(x, gain(0.50, k1)));
+  k2 = gain(Ts, k2);
+
+  // k3 = f(u, x + 3*k2/4)
+  k3 = f(u, sum(x, gain(0.75, k2)));
+  k3 = gain(Ts, k3);
+  
+  // New state
+  // xnext  = x + (2*k1 + 3*k2 + 4*k3)/9
+  x = sum(x, sum( sum(gain(2.0/9.0, k1), gain(3.0/9.0, k2)), gain(4.0/9.0, k3)));
+}
+
+float [] f(float u, float[] x) {
+  // Parameters of the model
+  float M = 1, m = 0.1, J = 0.025, L = 0.5, a = 0.5,  g = 9.807; 
+
+  // Get states
+  float x1 = x[0], x2 = x[1], x3 = x[2], x4 = x[3]; 
+  
+  // Force saturation
+  u       = max(-maxforce, min(maxforce, u));
+  
+  // Impact force
+  u       = u + impact_force(M+m, x1, x3);
+  
+  // Derivatives of the states 
+  // x1 = linear position, x2 = angular position
+  // x3 = linear velocity, x4 = angular velocity
+  float [] xdot = new float[4];  
+  xdot[0] = x3; 
+  xdot[1] = x4;
+  xdot[2] = (cos(x2)*(L*L*L)*(a*a*a)*(m*m)*(x4*x4) - (g*sin(2*x2)*(L*L)*(a*a)*(m*m))/2 + u*(L*L)*(a*a)*m + J*cos(x2)*L*a*m*(x4*x4) + J*u)/((L*L)*(a*a)*(m*m)*(cos(x2)*cos(x2)) + M*(L*L)*(a*a)*m + J*m + J*M);
+  xdot[3] = (L*a*m*(L*a*m*cos(x2)*sin(x2)*(x4*x4) + u*sin(x2) - g*m*cos(x2) - M*g*cos(x2)))/((L*L)*(a*a)*(m*m)*(cos(x2)*cos(x2)) + M*(L*L)*(a*a)*m + J*m + J*M);
+ 
+  return xdot;
+}  
+
+// Impact force
+float impact_force(float mass, float position, float velocity) {
+// Settling time
+float ts     = 0.1;
+// Damping 
+float xi     = 0.707;
+// Natural frequency
+float wn     = 4/(ts*xi);
+// Spring constant
+float kp     = mass*wn*wn;
+// Damper constant
+float kv     = 2*mass*xi*wn;
+// Impact force
+float f      = 0;
+float limit  = 1.7;
+
+// Collision with the left wall
+if ((position < -limit) && (velocity < 0)) {
+  f             = -kp*(position + limit) -kv*velocity;
+}
+
+// Collision with the right wall
+if (position > limit && velocity > 0) {
+  f       = -kp*(position-limit) -kv*velocity;
+}
+
+return f;
+}
+
+// Function to sum vectors
+float [] sum(float [] a, float [] b) {
+  float [] r = {a[0]+b[0], a[1]+b[1], a[2]+b[2], a[3]+b[3]};
+  return r;
+}
+
+// Function to multiply a scalar by a vector
+float [] gain(float k, float [] v) {
+  float [] r = {k*v[0], k*v[1], k*v[2], k*v[3]};
+  return r;
+}  
+/*
+    FUNCTIONS FOR CART-PENDULUM ANIMATION
+*/
+void draw_cart_pendulum(float X, float Th) {
+  // Parameters of the cart
+  float CartWidth    = +0.60;
+  float CartHeight   = +0.20;
+  float WheelRadius  = +0.05;
+  float WheelPos     = +0.15;
+  float PendLength   = +1.00;
+  float PendWidth    = +0.02;
+  float FreeSpace    = +4.40;
+  
+  // Ground
+  fill(0);
+  rectangle(-2.2, -0.05, FreeSpace, 0.05);
+  
+  // Left wall
+  fill(255, 0, 0);
+  rectangle(-2.05, 0, 0.05, 1);
+
+  // Right wall
+  fill(255, 0, 0);
+  rectangle(+2.0, 0, 0.05, 1);
+ 
+  // Cart
+  fill(0, 0, 255);
+  rectangle(X-CartWidth/2, WheelRadius, CartWidth, CartHeight);
+ 
+  // Left wheel
+  fill(255, 0, 0);
+  circle(X-WheelPos, WheelRadius, WheelRadius);
+ 
+  // Right wheel
+  fill(255, 0, 0);
+  circle(X+WheelPos, WheelRadius, WheelRadius);
+ 
+  // Pendulum
+  float Y  = CartHeight + WheelRadius;
+  float x1 = X + rotx(-0.05*PendLength, -PendWidth, Th);
+  float y1 = Y + roty(-0.05*PendLength, -PendWidth, Th);
+  float x2 = X + rotx(-0.05*PendLength, +PendWidth, Th);
+  float y2 = Y + roty(-0.05*PendLength, +PendWidth, Th);
+  float x3 = X + rotx(+0.95*PendLength, +PendWidth, Th);
+  float y3 = Y + roty(+0.95*PendLength, +PendWidth, Th);
+  float x4 = X + rotx(+0.95*PendLength, -PendWidth, Th);
+  float y4 = Y + roty(+0.95*PendLength, -PendWidth, Th);
+  fill(0, 255, 0);
+  quad(world2canvasx(x1), world2canvasy(y1), world2canvasx(x2), world2canvasy(y2), world2canvasx(x3), world2canvasy(y3), world2canvasx(x4), world2canvasy(y4));
+}
+
+
+// Returns the X coordinate after apply a rotation to a vector
+float rotx(float x,  float y, float angle) {
+  return cos(angle)*x - sin(angle)*y;
+}
+
+// Returns the Y coordinate after apply a rotation to a vector
+float roty(float x,  float y, float angle) {
+ return sin(angle)*x + cos(angle)*y;  
+}
+
+// Rectangle in physical coordinates
+void rectangle(float x, float y, float w, float h) { 
+  int xp = world2canvasx(x);
+  int yp = world2canvasy(y);
+  int wp = world2canvas_scalex(w);
+  int hp = world2canvas_scaley(h);
+  rect(xp, yp-hp, wp, hp);  
+}
+
+// Circle
+void circle(float x, float y, float r) {
+  int xp = world2canvasx(x);
+  int yp = world2canvasy(y);
+  int rp = world2canvas_scalex(r);
+  ellipse(xp, yp, rp, rp);
+}
+
+/* Transformations for real world to Processing canvas
+X-AXIS:
+Canvas      Real World
+0           minworldx
+maxcanvasx  maxworldx
+*/
+float canvas2worldx(int canvasx) {
+  return map(canvasx, 0, maxcanvasx, minworldx, maxworldx);
+}  
+
+int world2canvasx(float worldx) {
+  return round(map(worldx, minworldx, maxworldx, 0, maxcanvasx));
+}  
+
+float canvas2world_scalex(int canvasx) {
+  return map(canvasx, 0, maxcanvasx, 0, maxworldx-minworldx);
+}  
+
+int world2canvas_scalex(float worldx) {
+  return round(map(worldx, 0, maxworldx-minworldx, 0, maxcanvasx));
+}  
+
+/* Transformations for real world to Processing canvas
+Y-AXIS:
+Canvas      Real World
+0           maxworldy 
+maxcanvasy  minworldy
+*/
+float canvas2worldy(int canvasy) {
+  return map(canvasy, 0, maxcanvasy, maxworldy, minworldy);
+}  
+
+int world2canvasy(float worldy) {
+  return (int)map(worldy, maxworldy, minworldy, 0, maxcanvasy);
+}  
+
+float canvas2world_scaley(int canvasy) {
+  return map(canvasy, 0, maxcanvasy, 0, maxworldy-minworldy);
+}  
+
+int world2canvas_scaley(float worldy) {
+  return (int)map(worldy, 0, maxworldy-minworldy, 0, maxcanvasy);
+}  
+
+// Slider to read the setpoint
+int squarex = world2canvasx(0);
+int moving_square = 0;
+void draw_slider() {
+  int squareside = 10;
+  int slidey = 360;  
+  
+  // Move the slider to change the setpoint 
+  textAlign(CENTER);
+  fill(0, 0, 0);
+  text("Move the slider to change the setpoint", 240, 400);
+  
+  // Container
+  fill(255, 255, 0);
+  rect(world2canvasx(-1.7), slidey-10, world2canvas_scalex(3.4), 20);
+  
+  // Condition for the square not to move with the mouse
+  if ((mouseX >= squarex) && (mouseX <= squarex + squareside) && (mousePressed == true)) {
+    moving_square = 1;
+  }  
+
+  // Condition for the square not to move with the mouse
+  if ((moving_square == 1) && (mousePressed == false)) {
+    moving_square = 0;
+  } 
+ 
+  if (moving_square == 1) {
+    fill(0, 255, 0);
+    squarex = max(world2canvasx(-1.7), min(world2canvasx(1.7), mouseX));   
+  } else {
+    fill(255, 0, 0);   
+  }
+ 
+  // Slide square
+  rect(squarex-squareside/2, slidey-squareside/2, squareside, squareside);
+  line(squarex, 0, squarex, slidey+20);
+}  
